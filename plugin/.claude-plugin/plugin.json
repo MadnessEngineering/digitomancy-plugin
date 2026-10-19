@@ -1,0 +1,17 @@
+{
+  "name": "digitomancy",
+  "version": "0.1.0",
+  "description": "Drive an Android phone or emulator from Claude: read the screen, tap and type, remember buttons as named anchors, and run resumable multi-step routines with checkpoints. Includes a Tasker bridge.",
+  "author": {
+    "name": "Madness Engineering"
+  },
+  "keywords": [
+    "android",
+    "adb",
+    "automation",
+    "uiautomator2",
+    "tasker",
+    "bluestacks"
+  ],
+  "license": "MIT"
+}

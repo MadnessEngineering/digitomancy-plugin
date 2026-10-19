@@ -1,0 +1,16 @@
+# Developer options (Pixel / AOSP Settings). Reached by intent, not menu-walking.
+app: com.android.settings
+hazards:
+  - "switch_bar 'Use developer options' — turning it off disables USB debugging and drops our adb link. Never anchor it."
+  - "USB debugging / Wireless debugging rows — same story."
+anchors:
+  search:
+    selector: {description: "Search settings"}
+    notes: "top-right search; faster than scrolling to a known option"
+  up:
+    selector: {description: "Navigate up"}
+screens:
+  main:
+    all:
+      - activity: DevelopmentSettingsActivity
+      - selector: {text: "Use developer options"}

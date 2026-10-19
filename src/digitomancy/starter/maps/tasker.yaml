@@ -1,0 +1,32 @@
+# Tasker 6.7.x main screen (net.dinglisch.android.taskerm). Read-only anchors.
+app: net.dinglisch.android.taskerm
+hazards:
+  - "button_enabled Switch on each profile row toggles that profile live. Never tap."
+  - "Long-press on a project tab opens the project menu (incl. delete). Tap only."
+  - "Profile/task rows are drag-reorderable — keep swipes short and fast (<=0.3s)."
+  - "Tapping the ALREADY-selected entity tab (e.g. PROFILES) opens its menu (Import Profile / Set Sort). Tap a tab only when switching to it."
+  - "Profiles can control real-world things (locks, lights, messages). Never run a task you haven't read."
+  - "Never force-stop Tasker (launch stop_first / am force-stop) — kills profile monitoring."
+  - "A Tasker scene (.SceneActivity) can pop over the main screen; exit with Back, never tap its buttons."
+  - "Tapping a task row opens the task editor; back out without edits. 'Save & Apply' commits."
+anchors:
+  tab_profiles:
+    selector: {resourceId: "net.dinglisch.android.taskerm:id/tab_text", text: "PROFILES"}
+  tab_tasks:
+    selector: {resourceId: "net.dinglisch.android.taskerm:id/tab_text", text: "TASKS"}
+  tab_scenes:
+    selector: {resourceId: "net.dinglisch.android.taskerm:id/tab_text", text: "SCENES"}
+  tab_vars:
+    selector: {resourceId: "net.dinglisch.android.taskerm:id/tab_text", text: "VARS"}
+  search:
+    selector: {description: "Search Tasker"}
+screens:
+  main:
+    all:
+      - app: net.dinglisch.android.taskerm
+      - selector: {resourceId: "net.dinglisch.android.taskerm:id/tab_text", text: "PROFILES"}
+  # tab `selected` isn't reliable here; detect the list by its row ids instead
+  profiles:
+    all:
+      - activity: ".Main"
+      - selector: {resourceId: "net.dinglisch.android.taskerm:id/profile_name"}

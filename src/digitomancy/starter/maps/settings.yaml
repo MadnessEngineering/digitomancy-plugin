@@ -1,0 +1,20 @@
+# Example map — Android Settings. Selectors are regexes so stock Android
+# ("Network & internet") and Samsung One UI ("Connections") both match.
+# Points are normalized fallbacks; re-learn them with `save_anchor` per device.
+app: com.android.settings
+anchors:
+  network:
+    selector: {textMatches: "(?i)^(network.*|connections)$"}
+    point: [0.5, 0.22]
+    notes: "top-level network entry"
+  wifi:
+    selector: {textMatches: "(?i)^(wi-?fi|internet)$"}
+screens:
+  home:
+    all:
+      - app: com.android.settings
+      - anchor: settings:network
+  network:
+    all:
+      - app: com.android.settings
+      - anchor: settings:wifi

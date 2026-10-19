@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "digitomancy": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--quiet",
+        "--frozen",
+        "--project",
+        "${CLAUDE_PLUGIN_ROOT}/server",
+        "digitomancy-mcp"
+      ]
+    }
+  }
+}
