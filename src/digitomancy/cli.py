@@ -110,6 +110,7 @@ def cmd_catalog(args) -> int:
         sources,
         tasker_catalog.manual_hazards(config.CATALOG_DIR / "hazards_manual.txt"),
         config.CATALOG_DIR / "hazard_patterns.txt",
+        config.CATALOG_DIR / "redact_patterns.txt",
     )
     j, m = tasker_catalog.write(cat, config.CATALOG_DIR)
     for name, p in cat["projects"].items():

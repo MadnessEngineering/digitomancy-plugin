@@ -25,12 +25,26 @@ from pathlib import Path
 _BAD_XML = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")  # Tasker writes raw ESC etc.
 _SECRET = re.compile(
     r"(sk-[A-Za-z0-9_\-]{10,}|Bearer\s+\S+|AIza[0-9A-Za-z_\-]{20,}|ghp_[A-Za-z0-9]{20,}"
+    r"|Basic\s+[A-Za-z0-9+/=]{8,}"
     r"|\b[A-Za-z0-9_\-]{32,}\b|(api[_-]?key|token|secret|passw(or)?d)\s*[:=]"
     r"|[\w.+-]+@[\w-]+\.[\w.]+"  # email
     r"|\+?\d[\d ()-]{8,}\d"  # phone-ish
     r"|-?\d{1,3}\.\d{4,}\s*,\s*-?\d{1,3}\.\d{4,})",  # lat,long
     re.I,
 )
+# URLs collapse to their base host: paths/queries carry IDs and keys, and
+# tenant subdomains (acme.slack.com, acme.atlassian.net) name the employer.
+_URL = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s«»\"'<>]+", re.I)
+_IPV4 = re.compile(r"^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$")
+# Bare addresses (MQTT brokers, SSH hosts, code snippets) with optional :port.
+_BARE_IP = re.compile(r"(?<![\w.])(\d{1,3}(?:\.\d{1,3}){3})(?::\d{1,5})?(?![\w.])")
+_HOST_TOKEN = re.compile(r"\[(?:url [^\]]*|ip|lan)\]")
+_VARREF = re.compile(r"%+(\w+)(\(\w*\))?")
+# Variable names whose VALUE is secret. Checked per action: in
+# "Variable Set %WifiPass hunter2" neither argument looks secret on its own.
+_SECRET_NAME = re.compile(r"pass|pwd|token|secret|api_?key|auth|cred|otp|cookie|session|priv(ate)?_?key|(^|_)pin($|_)", re.I)
+_site: re.Pattern | None = None  # site-specific redactions, set by build() from redact_patterns.txt
+
 HAZARD_WORDS = r"doors?|unlock\w*|butterfly\w*|backdoor|garage|gates?"
 HAZARD = re.compile(rf"\b({HAZARD_WORDS})\b", re.I)
 
@@ -62,24 +76,83 @@ def load_xml(path: Path) -> ET.Element:
     return ET.fromstring(_BAD_XML.sub("", path.read_text(encoding="utf-8", errors="replace")))
 
 
+def _ip_kind(ip: str) -> str | None:
+    m = _IPV4.match(ip)
+    if not m or any(int(x) > 255 for x in ip.split(".")):
+        return None
+    a, b = int(m.group(1)), int(m.group(2))
+    return "lan" if a in (10, 127) or (a, b) == (192, 168) or (a == 172 and 16 <= b <= 31) else "ip"
+
+
+def url_host(url: str) -> str:
+    """`https://acme.slack.com/x?k=v` -> `slack.com`; private IPs -> `lan`, public -> `ip`."""
+    m = re.match(r"[a-z][a-z0-9+.-]*://(?:[^@/\s]*@)?([^/:?#\s…]+)", url, re.I)
+    host = (m.group(1) if m else "").lower().rstrip(".")
+    kind = _ip_kind(host)
+    if kind:
+        return kind
+    parts = [x for x in host.split(".") if x]
+    if len(parts) <= 2:
+        return host or "?"
+    keep = 3 if len(parts[-1]) == 2 and parts[-2] in ("co", "com", "net", "org", "ac", "gov", "edu") else 2
+    return ".".join(parts[-keep:])
+
+
+def site_re(path: Path | None) -> re.Pattern | None:
+    """Site-specific redactions (one regex per line, # comments): employer names, places…"""
+    lines = manual_hazards(path) if path else []
+    return re.compile("|".join(f"(?:{x})" for x in lines), re.I) if lines else None
+
+
+def is_secret_var(name: str) -> bool:
+    return bool(_SECRET_NAME.search(name.lstrip("%")))
+
+
+def _has_literal(s: str) -> bool:
+    """True if `s` holds text beyond %variable references (i.e. a value worth hiding)."""
+    return bool(re.search(r"[A-Za-z0-9]", _VARREF.sub("", s)))
+
+
+def _sensitive(*texts: str) -> bool:
+    return any(is_secret_var(m.group(1)) for t in texts if t for m in _VARREF.finditer(t))
+
+
 def clean(s: str | None, n: int = 80) -> str:
     if not s:
         return ""
     s = " ".join(s.split())
+    s = _URL.sub(lambda m: f"[url {url_host(m.group(0))}]", s)
+    s = _BARE_IP.sub(lambda m: f"[{_ip_kind(m.group(1))}]" if _ip_kind(m.group(1)) else m.group(0), s)
+    if _site is not None:
+        s = _site.sub("[redacted]", s)
     if _SECRET.search(s):
         return "[redacted]"
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
-def _blurb(el: ET.Element) -> str:
+def _blurb_raw(el: ET.Element) -> str:
     for sub in el.iter():
         if sub.tag.endswith("BLURB") and sub.text:
-            return clean(sub.text)
+            return sub.text
     return ""
 
 
-def _strs(el: ET.Element, k: int = 2) -> list[str]:
-    return [clean(s.text, 50) for s in el.findall("Str") if s.text and s.text.strip()][:k]
+def _blurb(el: ET.Element) -> str:
+    return clean(_blurb_raw(el))
+
+
+def _strs(el: ET.Element, k: int = 2, sensitive: bool = False, keep_first: bool = False) -> list[str]:
+    """First `k` non-empty string args, cleaned. In a `sensitive` action (one that
+    touches a secret-named variable) any arg with literal text is redacted whole;
+    `keep_first` spares arg 0 (Perform Task's target is a task name, not a value)."""
+    out = []
+    for i, s in enumerate(x for x in el.findall("Str") if x.text and x.text.strip()):
+        if i == k:
+            break
+        # a collapsed URL/IP can't carry the value, so it may stay visible
+        hide = sensitive and _has_literal(_HOST_TOKEN.sub("", clean(s.text, 10**6))) and not (keep_first and i == 0)
+        out.append("[redacted]" if hide else clean(s.text, 50))
+    return out
 
 
 def _ids(text: str | None) -> list[int]:
@@ -103,15 +176,19 @@ def parse_task(t: ET.Element) -> Task:
     raw = [task.name or ""]
     for a in t.findall("Action"):
         code = int(a.findtext("code") or -1)
+        strs = [s.text or "" for s in a.findall("Str")]
+        sensitive = _sensitive(a.findtext("label") or "", _blurb_raw(a), *strs)
         label = clean(a.findtext("label"), 60)
-        blurb = _blurb(a)
-        args = _strs(a)
+        blurb = "" if sensitive else _blurb(a)  # free-text summary may spell out the value
+        args = _strs(a, sensitive=sensitive, keep_first=code == 130)
         name = ACTIONS.get(code, f"code:{code}")
-        if code == 130 and args:
-            task.calls.append(args[0])
+        if code == 130:
+            # raw target, not the display arg: redaction/truncation must not break the hazard graph
+            target = next((x.strip() for x in strs if x and x.strip()), "")
+            if target:
+                task.calls.append(target)
         bits = [name] + ([f"«{label}»"] if label else []) + ([blurb] if blurb else args)
         task.actions.append(" ".join(b for b in bits if b))
-        strs = [s.text or "" for s in a.findall("Str")]
         if code == 130:
             strs = strs[1:]  # call target is judged via `calls`, for a precise reason
         raw += [label, blurb, *strs]
@@ -124,7 +201,9 @@ def parse_context(c: ET.Element) -> str:
     name = CONTEXTS.get((c.tag, int(code))) if code and code.lstrip("-").isdigit() else None
     if c.tag in ("Time", "Day", "App", "Loc"):
         name = c.tag
-    bits = [name or f"{c.tag}:{code}", _blurb(c) or " ".join(_strs(c))]
+    strs = [s.text or "" for s in c.findall("Str")]
+    sensitive = _sensitive(_blurb_raw(c), *strs)
+    bits = [name or f"{c.tag}:{code}", ("" if sensitive else _blurb(c)) or " ".join(_strs(c, sensitive=sensitive))]
     return " ".join(b for b in bits if b)
 
 
@@ -172,7 +251,22 @@ def is_hazard_name(name: str, patterns_file: Path | None = None) -> bool:
     return bool(hazard_re(patterns_file).search(name))
 
 
-def build(paths: list[Path], manual: list[str] | None = None, patterns_file: Path | None = None) -> dict:
+def build(
+    paths: list[Path],
+    manual: list[str] | None = None,
+    patterns_file: Path | None = None,
+    redact_file: Path | None = None,
+) -> dict:
+    """Merge sources into the catalog. `redact_file`: site-specific redaction regexes."""
+    global _site
+    prev, _site = _site, site_re(redact_file)
+    try:
+        return _build(paths, manual, patterns_file)
+    finally:
+        _site = prev
+
+
+def _build(paths: list[Path], manual: list[str] | None, patterns_file: Path | None) -> dict:
     rx = hazard_re(patterns_file)
     best: dict[str, dict] = {}
     on_phone: set[str] = set()  # projects present in any full backup = installed

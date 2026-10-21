@@ -68,3 +68,77 @@ def test_site_hazard_patterns(sources, workshop, fake, tmp_path):
     (config.CATALOG_DIR / "hazard_patterns.txt").write_text("warehouse\n")
     with pytest.raises(tasker.HazardTask):
         tasker.run_task(fake(), "open-warehouse-lot")
+
+
+LEAKY = """<TaskerData sr="" dvi="1" tv="6.7.6">
+<Project sr="proj0"><name>Leaky</name><tids>20,21,22</tids></Project>
+<Task sr="task20"><edate>1</edate><id>20</id><nme>wifi share</nme>
+  <Action sr="act0"><code>547</code><Str sr="arg0">%WifiPassword</Str><Str sr="arg1">hunter2</Str></Action>
+  <Action sr="act1"><code>547</code><Str sr="arg0">%api_key</Str><Str sr="arg1">%input</Str></Action>
+  <Action sr="act2"><code>547</code><Str sr="arg0">%token</Str><Str sr="arg1">swordfish!</Str></Action>
+  <Action sr="act3"><code>104</code><Str sr="arg0">https://acme.slack.com/archives/D0123456?ts=99</Str></Action>
+  <Action sr="act4"><code>339</code><Str sr="arg0">http://192.168.1.50:8080/hook</Str><Str sr="arg1">http://8.8.4.4:9900/x</Str></Action>
+  <Action sr="act5"><code>548</code><Str sr="arg0">standup at Acme Corp</Str></Action>
+  <Action sr="act6"><code>339</code><Str sr="arg0">Authorization: Basic dXNlcjpodW50ZXIy</Str></Action>
+  <Action sr="act7"><code>130</code><Str sr="arg0">a task with a really long name that runs past fifty characters</Str><Str sr="arg1">%pin</Str></Action>
+</Task>
+<Task sr="task21"><edate>1</edate><id>21</id><nme>a task with a really long name that runs past fifty characters</nme>
+  <Action sr="act0"><code>548</code><Str sr="arg0">open the garage</Str></Action></Task>
+<Task sr="task22"><edate>1</edate><id>22</id><nme>weather</nme>
+  <Action sr="act0"><code>339</code><Str sr="arg0">https://api.example.co.uk/v1?appid=abc</Str></Action>
+  <Action sr="act1"><code>339</code><Str sr="arg0">https://api.example.com/v1/chat</Str><Str sr="arg1">Authorization:Bearer %api_key</Str></Action>
+  <Action sr="act2"><code>548</code><Str sr="arg0">ssh 8.8.4.4:22 then mqtt 10.0.0.7 v1.2.3</Str></Action></Task>
+</TaskerData>"""
+
+
+@pytest.fixture
+def leaky(tmp_path):
+    p = tmp_path / "leaky.prj.xml"
+    p.write_text(LEAKY)
+    site = tmp_path / "redact_patterns.txt"
+    site.write_text("# employer\nacme\n")
+    cat = tc.build([p], redact_file=site)
+    return {t["name"]: t for t in cat["projects"]["Leaky"]["tasks"]}, cat
+
+
+def test_secret_named_variables_hide_literal_values(leaky):
+    tasks, _ = leaky
+    acts = tasks["wifi share"]["actions"]
+    assert acts[0] == "Variable Set %WifiPassword [redacted]"
+    assert acts[1] == "Variable Set %api_key %input"  # variable-to-variable copy stays readable
+    assert acts[2] == "Variable Set %token [redacted]"
+    blob = " ".join(acts)
+    assert "hunter2" not in blob and "swordfish" not in blob and "dXNlcjpodW50ZXIy" not in blob
+
+
+def test_urls_collapse_to_base_host(leaky):
+    tasks, _ = leaky
+    acts = tasks["wifi share"]["actions"]
+    assert acts[3] == "code:104 [url slack.com]"  # tenant subdomain, path and query gone
+    assert acts[4] == "HTTP Request [url lan] [url ip]"
+    assert tasks["weather"]["actions"][0] == "HTTP Request [url example.co.uk]"
+    assert tc.url_host("https://user:pw@sub.example.com:8443/p") == "example.com"
+
+
+def test_site_patterns_redact(leaky):
+    tasks, _ = leaky
+    assert tasks["wifi share"]["actions"][5] == "Flash standup at [redacted] Corp"
+    assert "acme" not in " ".join(tasks["wifi share"]["actions"]).lower()
+    assert tc._site is None  # build() restores module state
+
+
+def test_perform_task_target_survives_redaction_and_truncation(leaky):
+    tasks, cat = leaky
+    long_name = "a task with a really long name that runs past fifty characters"
+    assert tasks["wifi share"]["calls"] == [long_name]  # raw name, not the 50-char display
+    assert tasks["wifi share"]["actions"][7].startswith("Perform Task a task with")  # target kept, %pin is a var ref
+    # the long-named task mentions "garage" -> hazard, and the caller inherits it via the raw call target
+    assert {long_name, "wifi share"} <= set(cat["hazard_tasks"])
+
+
+def test_bare_ips_and_urls_in_sensitive_actions(leaky):
+    tasks, _ = leaky
+    acts = tasks["weather"]["actions"]
+    # %api_key makes the action sensitive; the collapsed URL is still shown, the header isn't
+    assert acts[1] == "HTTP Request [url example.com] [redacted]"
+    assert acts[2] == "Flash ssh [ip] then mqtt [lan] v1.2.3"
